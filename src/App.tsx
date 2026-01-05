@@ -609,6 +609,19 @@ export default function App() {
     return resolved;
   };
 
+  const isGraphState = (value: unknown): value is GraphState => {
+    if (!value || typeof value !== "object") {
+      return false;
+    }
+    const candidate = value as GraphState;
+    return (
+      Array.isArray(candidate.claims) &&
+      Array.isArray(candidate.relations) &&
+      Array.isArray(candidate.warrants) &&
+      Array.isArray(candidate.gates)
+    );
+  };
+
   const buildExplanations = (state: GraphState) => {
     const explanations: Record<string, ClaimExplanation> = {};
     const claimIndex: Record<string, Claim> = Object.fromEntries(
@@ -1076,8 +1089,8 @@ export default function App() {
     }
   };
 
-  const recomputeScores = async (override?: GraphState) => {
-    const payloadGraph = override ?? graph;
+  const recomputeScores = async (override?: GraphState | unknown) => {
+    const payloadGraph = isGraphState(override) ? override : graph;
     try {
       const response = await fetch(`${backendUrl}/scores`, {
         method: "POST",
@@ -1206,9 +1219,9 @@ export default function App() {
             <button className="btn" type="button" onClick={runCritique}>
               Run Critique
             </button>
-            <button className="btn" type="button" onClick={recomputeScores}>
-              Recompute Scores
-            </button>
+              <button className="btn" type="button" onClick={() => recomputeScores()}>
+                Recompute Scores
+              </button>
             <button className="btn" type="button" onClick={() => fileInputRef.current?.click()}>
               Import
             </button>
