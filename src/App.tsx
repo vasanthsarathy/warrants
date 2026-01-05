@@ -432,6 +432,14 @@ export default function App() {
   const [bottomTab, setBottomTab] = useState(bottomTabs[0]);
   const [outlinerTab, setOutlinerTab] = useState<Selection["type"]>("claim");
   const [backendUrl, setBackendUrl] = useState("http://127.0.0.1:8000");
+  const [provider, setProvider] = useState("openai");
+  const [model, setModel] = useState("gpt-5-mini");
+  const [miningText, setMiningText] = useState("");
+  const [miningUrl, setMiningUrl] = useState("");
+  const [miningUseLlm, setMiningUseLlm] = useState(true);
+  const [miningLongDoc, setMiningLongDoc] = useState(true);
+  const [miningIncludeLinks, setMiningIncludeLinks] = useState(true);
+  const [isMining, setIsMining] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [miniMapEnabled, setMiniMapEnabled] = useState(false);
   const nodeTypes = useMemo(() => ({ claim: ClaimNode }), []);
@@ -607,6 +615,149 @@ export default function App() {
       }
     });
     return resolved;
+  };
+
+  const normalizeClaimType = (value: unknown): ClaimType => {
+    if (value === "fact" || value === "value" || value === "policy") {
+      return value;
+    }
+    return "other";
+  };
+
+  const normalizeProvider = (value: string) => {
+    if (value === "openai" || value === "anthropic" || value === "ollama") {
+      return value;
+    }
+    return "openai";
+  };
+
+  const mapArglibToGraphState = (payload: Record<string, any>): GraphState => {
+    const units = payload.units ?? {};
+    const warrantsPayload = payload.warrants ?? {};
+    const relationsPayload = Array.isArray(payload.relations) ? payload.relations : [];
+    const evidenceCards = payload.evidence_cards ?? {};
+    const supportingDocs = payload.supporting_documents ?? {};
+
+    const claims: Claim[] = Object.entries(units).map(([unitId, unit]) => ({
+      id: String(unit?.id ?? unitId),
+      text: String(unit?.text ?? ""),
+      type: normalizeClaimType(unit?.type),
+      credibility: typeof unit?.score === "number" ? unit.score : 0,
+      evidenceIds: Array.isArray(unit?.evidence_ids) ? unit.evidence_ids : [],
+      isAxiom: Boolean(unit?.is_axiom),
+      ignoreInfluence: Boolean(unit?.ignore_influence),
+    }));
+
+    const warrants: Warrant[] = Object.entries(warrantsPayload).map(
+      ([warrantId, warrant]) => ({
+        id: String(warrant?.id ?? warrantId),
+        text: String(warrant?.text ?? ""),
+        credibility: typeof warrant?.score === "number" ? warrant.score : 0,
+        evidenceIds: Array.isArray(warrant?.evidence_ids) ? warrant.evidence_ids : [],
+        isAxiom: Boolean(warrant?.is_axiom),
+        ignoreInfluence: Boolean(warrant?.ignore_influence),
+      })
+    );
+
+    const relations: Relation[] = relationsPayload.map((relation, index) => ({
+      id: `r${index + 1}`,
+      source: String(relation?.src ?? ""),
+      target: String(relation?.dst ?? ""),
+      kind: relation?.kind === "attack" ? "attack" : "support",
+      gateId: `g${index + 1}`,
+      weight:
+        typeof relation?.weight === "number"
+          ? relation.weight
+          : relation?.kind === "attack"
+            ? -0.4
+            : 0.4,
+    }));
+
+    const gates: Gate[] = relationsPayload.map((relation, index) => ({
+      id: `g${index + 1}`,
+      mode: relation?.gate_mode === "AND" ? "AND" : "OR",
+      warrantIds: Array.isArray(relation?.warrant_ids) ? relation.warrant_ids : [],
+      status: "active",
+    }));
+
+    const evidence: Evidence[] = Object.values(evidenceCards).map((card: any) => ({
+      id: String(card?.id ?? ""),
+      title: String(card?.title ?? ""),
+      excerpt: String(card?.excerpt ?? ""),
+      trust: typeof card?.confidence === "number" ? card.confidence : 0.5,
+      docId: card?.supporting_doc_id ? String(card.supporting_doc_id) : undefined,
+    }));
+
+    const supportingDocsList: SupportingDocument[] = Object.values(supportingDocs).map(
+      (doc: any) => ({
+        id: String(doc?.id ?? ""),
+        name: String(doc?.name ?? ""),
+        sourceType:
+          doc?.type === "pdf" || doc?.type === "url" || doc?.type === "note"
+            ? doc.type
+            : "note",
+        location: String(doc?.url ?? ""),
+      })
+    );
+
+    return {
+      claims,
+      relations,
+      warrants,
+      gates,
+      evidence,
+      supportingDocs: supportingDocsList,
+      logs: [],
+      flaws: [],
+      flawClaims: [],
+      flawEdges: [],
+      patterns: [],
+      fragility: [],
+      explanations: {},
+      missingAssumptions: [],
+    };
+  };
+
+  const nextCounterValue = (prefix: string, ids: string[]) => {
+    let max = 0;
+    ids.forEach((id) => {
+      if (!id.startsWith(prefix)) {
+        return;
+      }
+      const suffix = Number(id.slice(prefix.length));
+      if (!Number.isNaN(suffix)) {
+        max = Math.max(max, suffix);
+      }
+    });
+    return max + 1;
+  };
+
+  const applyMinedGraph = (nextGraph: GraphState, label: string) => {
+    setGraph({
+      ...seedGraph,
+      ...nextGraph,
+      logs: [
+        `${new Date().toLocaleTimeString()} - Mining complete (${label})`,
+        ...nextGraph.logs,
+      ],
+    });
+    claimCounter.current = nextCounterValue(
+      "c",
+      nextGraph.claims.map((claim) => claim.id)
+    );
+    relationCounter.current = nextCounterValue(
+      "r",
+      nextGraph.relations.map((rel) => rel.id)
+    );
+    warrantCounter.current = nextCounterValue(
+      "w",
+      nextGraph.warrants.map((warrant) => warrant.id)
+    );
+    evidenceCounter.current = nextCounterValue(
+      "e",
+      nextGraph.evidence.map((ev) => ev.id)
+    );
+    setSelection(nextGraph.claims[0] ? { type: "claim", id: nextGraph.claims[0].id } : null);
   };
 
   const isGraphState = (value: unknown): value is GraphState => {
@@ -1123,6 +1274,83 @@ export default function App() {
     }
   };
 
+  const mineText = async () => {
+    if (!miningText.trim()) {
+      return;
+    }
+    setIsMining(true);
+    try {
+      const response = await fetch(`${backendUrl}/mining/parse`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text: miningText,
+          provider: normalizeProvider(provider),
+          model: model || undefined,
+          use_llm: miningUseLlm,
+          long_document: miningLongDoc,
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(`Mining failed: ${response.status}`);
+      }
+      const payload = (await response.json()) as { payload?: Record<string, any> };
+      const graphPayload = payload.payload ?? payload;
+      applyMinedGraph(mapArglibToGraphState(graphPayload), "text");
+    } catch (error) {
+      setGraph((prev) => ({
+        ...prev,
+        logs: [
+          `${new Date().toLocaleTimeString()} - Mining error: ${
+            error instanceof Error ? error.message : "unknown"
+          }`,
+          ...prev.logs,
+        ],
+      }));
+    } finally {
+      setIsMining(false);
+    }
+  };
+
+  const mineUrl = async () => {
+    if (!miningUrl.trim()) {
+      return;
+    }
+    setIsMining(true);
+    try {
+      const response = await fetch(`${backendUrl}/mining/url`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          url: miningUrl,
+          provider: normalizeProvider(provider),
+          model: model || undefined,
+          use_llm: miningUseLlm,
+          long_document: miningLongDoc,
+          include_links: miningIncludeLinks,
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(`Mining failed: ${response.status}`);
+      }
+      const payload = (await response.json()) as { payload?: Record<string, any> };
+      const graphPayload = payload.payload ?? payload;
+      applyMinedGraph(mapArglibToGraphState(graphPayload), "url");
+    } catch (error) {
+      setGraph((prev) => ({
+        ...prev,
+        logs: [
+          `${new Date().toLocaleTimeString()} - Mining error: ${
+            error instanceof Error ? error.message : "unknown"
+          }`,
+          ...prev.logs,
+        ],
+      }));
+    } finally {
+      setIsMining(false);
+    }
+  };
+
   const handleExport = () => {
     const payload = JSON.stringify(graph, null, 2);
     const blob = new Blob([payload], { type: "application/json" });
@@ -1197,18 +1425,18 @@ export default function App() {
             <span>Backend</span>
             <input value={backendUrl} onChange={(event) => setBackendUrl(event.target.value)} />
           </label>
-          <label className="field">
-            <span>Provider</span>
-            <select defaultValue="OpenAI">
-              <option>OpenAI</option>
-              <option>Ollama</option>
-              <option>Anthropic</option>
-            </select>
-          </label>
-          <label className="field">
-            <span>Model</span>
-            <input defaultValue="gpt-5-mini" />
-          </label>
+            <label className="field">
+              <span>Provider</span>
+              <select value={provider} onChange={(event) => setProvider(event.target.value)}>
+                <option value="openai">OpenAI</option>
+                <option value="ollama">Ollama</option>
+                <option value="anthropic">Anthropic</option>
+              </select>
+            </label>
+            <label className="field">
+              <span>Model</span>
+              <input value={model} onChange={(event) => setModel(event.target.value)} />
+            </label>
           <div className="button-row">
             <button className="btn" type="button" onClick={addClaim}>
               New Claim
@@ -1239,15 +1467,74 @@ export default function App() {
         </div>
       </header>
 
-      <div className="workspace">
-        <aside className="panel outliner">
-          <div className="panel-header">Outliner</div>
-          <div className="panel-body">
-            <div className="tab-row">
-              <button
-                className={`tab ${outlinerTab === "claim" ? "active" : ""}`}
-                onClick={() => setOutlinerTab("claim")}
-              >
+        <div className="workspace">
+          <aside className="panel outliner">
+            <div className="panel-header">Outliner</div>
+            <div className="panel-body">
+              <details className="fold">
+                <summary>Mining</summary>
+                <label className="field">
+                  <span>Text</span>
+                  <textarea
+                    value={miningText}
+                    onChange={(event) => setMiningText(event.target.value)}
+                    placeholder="Paste text to mine..."
+                    rows={6}
+                  />
+                </label>
+                <div className="inline-row">
+                  <button
+                    className="btn"
+                    type="button"
+                    onClick={mineText}
+                    disabled={isMining}
+                  >
+                    Mine Text
+                  </button>
+                  <label className="field checkbox">
+                    <span>Use LLM</span>
+                    <input
+                      type="checkbox"
+                      checked={miningUseLlm}
+                      onChange={(event) => setMiningUseLlm(event.target.checked)}
+                    />
+                  </label>
+                  <label className="field checkbox">
+                    <span>Long doc</span>
+                    <input
+                      type="checkbox"
+                      checked={miningLongDoc}
+                      onChange={(event) => setMiningLongDoc(event.target.checked)}
+                    />
+                  </label>
+                </div>
+                <label className="field">
+                  <span>URL</span>
+                  <input
+                    value={miningUrl}
+                    onChange={(event) => setMiningUrl(event.target.value)}
+                    placeholder="https://example.com/article"
+                  />
+                </label>
+                <div className="inline-row">
+                  <button className="btn" type="button" onClick={mineUrl} disabled={isMining}>
+                    Mine URL
+                  </button>
+                  <label className="field checkbox">
+                    <span>Include links</span>
+                    <input
+                      type="checkbox"
+                      checked={miningIncludeLinks}
+                      onChange={(event) => setMiningIncludeLinks(event.target.checked)}
+                    />
+                  </label>
+                </div>
+              </details>
+              <div className="tab-row">
+                <button
+                  className={`tab ${outlinerTab === "claim" ? "active" : ""}`}
+                  onClick={() => setOutlinerTab("claim")}
+                >
                 Claims
               </button>
               <button
