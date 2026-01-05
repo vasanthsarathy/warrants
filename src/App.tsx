@@ -322,6 +322,8 @@ type ClaimNodeData = {
   id: string;
   text: string;
   credibility: number;
+  isAxiom: boolean;
+  ignoreInfluence: boolean;
   selected: boolean;
   hasFlaw: boolean;
   isImpact: boolean;
@@ -331,28 +333,36 @@ type ClaimNodeData = {
 function ClaimNode({ data }: NodeProps<ClaimNodeData>) {
   const score = getScoreClassification(data.credibility);
 
-  return (
-    <div
-      className={`claim-node ${data.selected ? "is-selected" : ""} ${
-        data.isImpact ? "is-impact" : ""
-      }`}
-      onMouseDown={() => data.onSelect?.()}
-      onClick={() => data.onSelect?.()}
-    >
-      <Handle type="target" position={Position.Left} className="claim-handle" />
-      <div className="claim-node-header">
-        <span className="claim-id">{data.id}</span>
-        <span
-          className="claim-confidence"
-          style={{
-            color: score.color,
-            background: score.bgColor,
-            borderColor: score.borderColor,
-          }}
-        >
-          {score.label}
-        </span>
-      </div>
+    return (
+      <div
+        className={`claim-node ${data.selected ? "is-selected" : ""} ${
+          data.isImpact ? "is-impact" : ""
+        }`}
+        onMouseDown={() => data.onSelect?.()}
+        onClick={() => data.onSelect?.()}
+      >
+        <Handle type="target" position={Position.Left} className="claim-handle" />
+        <div className="claim-node-header">
+          <div className="claim-meta">
+            <span className="claim-id">{data.id}</span>
+            {(data.isAxiom || data.ignoreInfluence) && (
+              <span className="claim-badges">
+                {data.isAxiom && <span className="claim-badge">A</span>}
+                {data.ignoreInfluence && <span className="claim-badge">I</span>}
+              </span>
+            )}
+          </div>
+          <span
+            className="claim-confidence"
+            style={{
+              color: score.color,
+              background: score.bgColor,
+              borderColor: score.borderColor,
+            }}
+          >
+            {score.label}
+          </span>
+        </div>
       {data.hasFlaw && <span className="claim-flaw" title="Flaw detected" />}
       <div className="claim-text">{data.text}</div>
       <div className="claim-score">{data.credibility.toFixed(2)}</div>
@@ -508,15 +518,17 @@ export default function App() {
         type: "claim",
         position:
           prev.find((node) => node.id === claim.id)?.position ?? { x: 120, y: 120 },
-        data: {
-          id: claim.id,
-          text: claim.text,
-          credibility: claim.credibility,
-          selected: selection?.type === "claim" && selection.id === claim.id,
-          hasFlaw: graph.flawClaims.includes(claim.id),
-          isImpact: selection?.type === "relation" && impactClaims.includes(claim.id),
-          onSelect: () => setSelection({ type: "claim", id: claim.id }),
-        },
+          data: {
+            id: claim.id,
+            text: claim.text,
+            credibility: claim.credibility,
+            isAxiom: claim.isAxiom,
+            ignoreInfluence: claim.ignoreInfluence,
+            selected: selection?.type === "claim" && selection.id === claim.id,
+            hasFlaw: graph.flawClaims.includes(claim.id),
+            isImpact: selection?.type === "relation" && impactClaims.includes(claim.id),
+            onSelect: () => setSelection({ type: "claim", id: claim.id }),
+          },
       }))
     );
 
@@ -562,6 +574,25 @@ export default function App() {
       ),
       logs: [`${new Date().toLocaleTimeString()} - Claim updated: ${claimId}`, ...prev.logs],
     }));
+  };
+
+  const updateClaimAndRecompute = (claimId: string, updates: Partial<Claim>) => {
+    setGraph((prev) => {
+      const next = {
+        ...prev,
+        claims: prev.claims.map((claim) =>
+          claim.id === claimId ? { ...claim, ...updates } : claim
+        ),
+        logs: [
+          `${new Date().toLocaleTimeString()} - Claim updated: ${claimId}`,
+          ...prev.logs,
+        ],
+      };
+      queueMicrotask(() => {
+        void recomputeScores(next);
+      });
+      return next;
+    });
   };
 
   const resolvePatternEdges = (patternEdges: string[]) => {
@@ -661,6 +692,25 @@ export default function App() {
         ...prev.logs,
       ],
     }));
+  };
+
+  const updateWarrantAndRecompute = (warrantId: string, updates: Partial<Warrant>) => {
+    setGraph((prev) => {
+      const next = {
+        ...prev,
+        warrants: prev.warrants.map((warrant) =>
+          warrant.id === warrantId ? { ...warrant, ...updates } : warrant
+        ),
+        logs: [
+          `${new Date().toLocaleTimeString()} - Warrant updated: ${warrantId}`,
+          ...prev.logs,
+        ],
+      };
+      queueMicrotask(() => {
+        void recomputeScores(next);
+      });
+      return next;
+    });
   };
 
   const addClaim = () => {
@@ -1026,12 +1076,13 @@ export default function App() {
     }
   };
 
-  const recomputeScores = async () => {
+  const recomputeScores = async (override?: GraphState) => {
+    const payloadGraph = override ?? graph;
     try {
       const response = await fetch(`${backendUrl}/scores`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(graph),
+        body: JSON.stringify(payloadGraph),
       });
       if (!response.ok) {
         throw new Error(`Scoring failed: ${response.status}`);
@@ -1393,7 +1444,9 @@ export default function App() {
                     type="checkbox"
                     checked={selectedClaim.isAxiom}
                     onChange={(event) =>
-                      updateClaim(selectedClaim.id, { isAxiom: event.target.checked })
+                      updateClaimAndRecompute(selectedClaim.id, {
+                        isAxiom: event.target.checked,
+                      })
                     }
                   />
                 </label>
@@ -1403,7 +1456,9 @@ export default function App() {
                     type="checkbox"
                     checked={selectedClaim.ignoreInfluence}
                     onChange={(event) =>
-                      updateClaim(selectedClaim.id, { ignoreInfluence: event.target.checked })
+                      updateClaimAndRecompute(selectedClaim.id, {
+                        ignoreInfluence: event.target.checked,
+                      })
                     }
                   />
                 </label>
@@ -1695,24 +1750,28 @@ export default function App() {
                 </label>
                 <label className="field checkbox">
                   <span>Axiom</span>
-                  <input
-                    type="checkbox"
-                    checked={selectedWarrant.isAxiom}
-                    onChange={(event) =>
-                      updateWarrant(selectedWarrant.id, { isAxiom: event.target.checked })
-                    }
-                  />
-                </label>
-                <label className="field checkbox">
-                  <span>Ignore influence</span>
-                  <input
-                    type="checkbox"
-                    checked={selectedWarrant.ignoreInfluence}
-                    onChange={(event) =>
-                      updateWarrant(selectedWarrant.id, { ignoreInfluence: event.target.checked })
-                    }
-                  />
-                </label>
+                    <input
+                      type="checkbox"
+                      checked={selectedWarrant.isAxiom}
+                      onChange={(event) =>
+                        updateWarrantAndRecompute(selectedWarrant.id, {
+                          isAxiom: event.target.checked,
+                        })
+                      }
+                    />
+                  </label>
+                  <label className="field checkbox">
+                    <span>Ignore influence</span>
+                    <input
+                      type="checkbox"
+                      checked={selectedWarrant.ignoreInfluence}
+                      onChange={(event) =>
+                        updateWarrantAndRecompute(selectedWarrant.id, {
+                          ignoreInfluence: event.target.checked,
+                        })
+                      }
+                    />
+                  </label>
                 <details className="fold">
                   <summary>Evidence</summary>
                   <div className="list">
